@@ -1,0 +1,13 @@
+# Ignore Terraform state files
+*.tfstate
+*.tfstate.backup
+.terraform/
+tfplan
+
+# Node dependencies
+my-strapi-project/node_modules/
+
+# Sensitive files
+my-strapi-project/.env
+terraform.tfvars
+
