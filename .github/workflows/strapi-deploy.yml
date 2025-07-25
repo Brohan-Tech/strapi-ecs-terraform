@@ -1,4 +1,4 @@
-name: Deploy Strapi to AWS ECS
+name: Deploy Strapi to ECS
 
 on:
   push:
@@ -7,25 +7,23 @@ on:
 
 env:
   AWS_REGION: us-east-2
-  ECR_REPOSITORY: strapi-app
+  ECR_REPO: 607700977843.dkr.ecr.us-east-2.amazonaws.com/rohana-strapi-repo
   ECS_CLUSTER_NAME: rohana-strapi-cluster
   ECS_SERVICE_NAME: rohana-strapi-service
+  ECS_TASK_DEFINITION: rohana-strapi-task
+  CONTAINER_NAME: rohana-strapi
 
 jobs:
   deploy:
+    name: Build, Push & Deploy to ECS
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Terraform
-        uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: 1.8.5
-
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@v2
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -33,49 +31,38 @@ jobs:
 
       - name: Log in to Amazon ECR
         id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v2
+        uses: aws-actions/amazon-ecr-login@v1
 
-      - name: Generate image tag
-        id: tag
-        run: |
-          IMAGE_TAG=sha-$(git rev-parse --short HEAD)
-          echo "tag=$IMAGE_TAG" >> "$GITHUB_OUTPUT"
-          echo "full_image=${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG" >> "$GITHUB_OUTPUT"
+      - name: Extract short commit SHA
+        id: vars
+        run: echo "TAG=gh-${GITHUB_SHA::7}" >> $GITHUB_ENV
 
       - name: Build Docker image
         run: |
-          docker build -t ${{ steps.tag.outputs.full_image }} ./my-strapi-project
+          docker build -t $ECR_REPO:$TAG .
 
-      - name: Push Docker image
+      - name: Push Docker image to ECR
         run: |
-          docker push ${{ steps.tag.outputs.full_image }}
+          docker push $ECR_REPO:$TAG
 
-      - name: Terraform Init
-        run: terraform init
+      - name: Register new ECS task definition revision
+        id: task-def
+        run: |
+          TASK_DEF_ARN=$(aws ecs describe-task-definition \
+            --task-definition $ECS_TASK_DEFINITION \
+            --query "taskDefinition" > task-def.json && \
+            jq --arg IMAGE "$ECR_REPO:$TAG" \
+              --arg CONTAINER "$CONTAINER_NAME" \
+              '(.containerDefinitions[] | select(.name == $CONTAINER) | .image) = $IMAGE | .' task-def.json > new-task-def.json && \
+            aws ecs register-task-definition \
+              --cli-input-json file://new-task-def.json \
+              --query 'taskDefinition.taskDefinitionArn' --output text)
+          echo "TASK_DEF_ARN=$TASK_DEF_ARN" >> $GITHUB_ENV
 
-      - name: Terraform Plan
-        run: terraform plan -out=tfplan
-        env:
-          TF_VAR_aws_access_key: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          TF_VAR_aws_secret_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          TF_VAR_container_image: ${{ steps.tag.outputs.full_image }}
-          TF_VAR_app_keys: ${{ secrets.APP_KEYS }}
-          TF_VAR_admin_jwt_secret: ${{ secrets.ADMIN_JWT_SECRET }}
-          TF_VAR_jwt_secret: ${{ secrets.JWT_SECRET }}
-          TF_VAR_api_token_salt: ${{ secrets.API_TOKEN_SALT }}
-          TF_VAR_task_role_arn: ${{ secrets.TASK_ROLE_ARN }}
-          TF_VAR_execution_role_arn: ${{ secrets.EXECUTION_ROLE_ARN }}
-
-      - name: Terraform Apply
-        run: terraform apply -auto-approve tfplan
-        env:
-          TF_VAR_aws_access_key: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          TF_VAR_aws_secret_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          TF_VAR_container_image: ${{ steps.tag.outputs.full_image }}
-          TF_VAR_app_keys: ${{ secrets.APP_KEYS }}
-          TF_VAR_admin_jwt_secret: ${{ secrets.ADMIN_JWT_SECRET }}
-          TF_VAR_jwt_secret: ${{ secrets.JWT_SECRET }}
-          TF_VAR_api_token_salt: ${{ secrets.API_TOKEN_SALT }}
-          TF_VAR_task_role_arn: ${{ secrets.TASK_ROLE_ARN }}
-          TF_VAR_execution_role_arn: ${{ secrets.EXECUTION_ROLE_ARN }}
+      - name: Update ECS service
+        run: |
+          aws ecs update-service \
+            --cluster $ECS_CLUSTER_NAME \
+            --service $ECS_SERVICE_NAME \
+            --task-definition $TASK_DEF_ARN
 
