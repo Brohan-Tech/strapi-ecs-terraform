@@ -8,14 +8,14 @@ on:
 env:
   AWS_REGION: us-east-2
   ECR_REPO: 607700977843.dkr.ecr.us-east-2.amazonaws.com/rohana-strapi-repo
-  ECS_CLUSTER_NAME: rohana-strapi-cluster
-  ECS_SERVICE_NAME: rohana-strapi-service
-  ECS_TASK_DEFINITION: rohana-strapi-task
   CONTAINER_NAME: rohana-strapi
+  ECS_CLUSTER: rohana-strapi-cluster
+  ECS_SERVICE: rohana-strapi-service
+  ECS_TASK_DEFINITION: rohana-strapi-task
 
 jobs:
   deploy:
-    name: Build, Push & Deploy to ECS
+    name: Build and Deploy to ECS
     runs-on: ubuntu-latest
 
     steps:
@@ -23,7 +23,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v2
+        uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -31,38 +31,35 @@ jobs:
 
       - name: Log in to Amazon ECR
         id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v1
+        uses: aws-actions/amazon-ecr-login@v2
 
       - name: Extract short commit SHA
         id: vars
-        run: echo "TAG=gh-${GITHUB_SHA::7}" >> $GITHUB_ENV
+        run: echo "TAG=$(echo $GITHUB_SHA | cut -c1-7)" >> $GITHUB_ENV
 
       - name: Build Docker image
         run: |
-          docker build -t $ECR_REPO:$TAG .
+          docker build -t $ECR_REPO:$TAG ./my-strapi-project
 
       - name: Push Docker image to ECR
         run: |
           docker push $ECR_REPO:$TAG
 
-      - name: Register new ECS task definition revision
+      - name: Update ECS task definition
         id: task-def
         run: |
-          TASK_DEF_ARN=$(aws ecs describe-task-definition \
+          TASK_DEF_JSON=$(aws ecs describe-task-definition \
             --task-definition $ECS_TASK_DEFINITION \
-            --query "taskDefinition" > task-def.json && \
-            jq --arg IMAGE "$ECR_REPO:$TAG" \
-              --arg CONTAINER "$CONTAINER_NAME" \
-              '(.containerDefinitions[] | select(.name == $CONTAINER) | .image) = $IMAGE | .' task-def.json > new-task-def.json && \
-            aws ecs register-task-definition \
-              --cli-input-json file://new-task-def.json \
-              --query 'taskDefinition.taskDefinitionArn' --output text)
-          echo "TASK_DEF_ARN=$TASK_DEF_ARN" >> $GITHUB_ENV
+            --query 'taskDefinition' | jq '.
+            containerDefinitions[0].image = "'$ECR_REPO:$TAG'" | 
+            del(.status, .revision, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy, .taskDefinitionArn)')
+          echo "$TASK_DEF_JSON" > new-task-def.json
+          echo "NEW_TASK_DEF_ARN=$(aws ecs register-task-definition --cli-input-json file://new-task-def.json --query 'taskDefinition.taskDefinitionArn' --output text)" >> $GITHUB_ENV
 
       - name: Update ECS service
         run: |
           aws ecs update-service \
-            --cluster $ECS_CLUSTER_NAME \
-            --service $ECS_SERVICE_NAME \
-            --task-definition $TASK_DEF_ARN
+            --cluster $ECS_CLUSTER \
+            --service $ECS_SERVICE \
+            --task-definition ${{ env.NEW_TASK_DEF_ARN }}
 
